@@ -105,16 +105,24 @@ def pad_post(seqs: list[list[int]], maxlen: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Image preprocessing: make an uploaded picture look like an MNIST digit
 # ---------------------------------------------------------------------------
-def to_mnist(img: Image.Image) -> np.ndarray:
+def to_mnist(img: Image.Image) -> np.ndarray | None:
+    """Returns a 28x28 array in [0, 1], or None if the image has no digit in it."""
+    img = ImageOps.exif_transpose(img)  # phone photos are often stored rotated
+    if img.mode in ("RGBA", "LA", "P"):  # transparent background -> white
+        img = img.convert("RGBA")
+        img = Image.alpha_composite(Image.new("RGBA", img.size, "white"), img)
     g = ImageOps.grayscale(img)
     arr = np.asarray(g, dtype="float32")
-    if arr.mean() > 127:  # MNIST = white digit on black background
+    if arr.mean() < np.median(arr):  # digit darker than background -> invert (MNIST = white on black)
         arr = 255 - arr
-    arr[arr < 30] = 0  # remove light background noise
+    arr = np.clip(arr - np.median(arr), 0, None)  # grey paper / dim photo -> black background
+    if arr.max() < 40:  # nothing stands out from the background
+        return None
+    arr *= 255 / arr.max()
+    arr[arr < 80] = 0  # remove background noise
 
     ys, xs = np.nonzero(arr)
-    if len(xs):  # crop to the digit
-        arr = arr[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1]
+    arr = arr[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1]  # crop to the digit
 
     # fit into 20x20 (keeping aspect ratio), then centre on a 28x28 canvas
     digit = Image.fromarray(arr.astype("uint8"))
@@ -200,42 +208,49 @@ with tab_text:
 
         if st.button("Predict sentiment", type="primary"):
             sentences = [s.strip() for s in text.splitlines() if s.strip()]
-            if not sentences:
+            seqs = [text_to_sequence(s, tok) for s in sentences]
+            kept = [(s, q) for s, q in zip(sentences, seqs) if q]  # drop lines with no words (e.g. "!!!")
+            if not kept:
+                st.session_state.pop("text_preds", None)
                 st.info("Type at least one sentence.")
             else:
-                seqs = [text_to_sequence(s, tok) for s in sentences]
+                sentences, seqs = map(list, zip(*kept))
                 x = pad_post(seqs, cfg["max_length"])
-                probs = model_1d.predict(x, verbose=0).ravel()
-                oov = cfg.get("oov_index", 1)
+                st.session_state["text_preds"] = (sentences, seqs, model_1d.predict(x, verbose=0).ravel())
 
-                rows = []
-                for s, seq, p in zip(sentences, seqs, probs):
-                    pos = p >= threshold
-                    rows.append({
-                        "Sentence": s,
-                        "Prediction": "Positive" if pos else "Negative",
-                        "Confidence": float(p if pos else 1 - p),
-                        "P(positive)": float(p),
-                        "Unknown words": seq.count(oov),
-                        "Truncated": len(seq) > cfg["max_length"],
-                    })
-                df = pd.DataFrame(rows)
-                st.dataframe(
-                    df,
-                    hide_index=True,
-                    width="stretch",
-                    column_config={
-                        "Confidence": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=1),
-                        "P(positive)": st.column_config.NumberColumn(format="%.3f"),
-                    },
+        # stored in session_state so the table stays (and updates) when the threshold slider moves
+        if "text_preds" in st.session_state:
+            sentences, seqs, probs = st.session_state["text_preds"]
+            oov = cfg.get("oov_index", 1)
+
+            rows = []
+            for s, seq, p in zip(sentences, seqs, probs):
+                pos = p >= threshold
+                rows.append({
+                    "Sentence": s,
+                    "Prediction": "Positive" if pos else "Negative",
+                    "Confidence": float(p if pos else 1 - p),
+                    "P(positive)": float(p),
+                    "Unknown words": seq.count(oov),
+                    "Truncated": len(seq) > cfg["max_length"],
+                })
+            df = pd.DataFrame(rows)
+            st.dataframe(
+                df,
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "Confidence": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=1),
+                    "P(positive)": st.column_config.NumberColumn(format="%.3f"),
+                },
+            )
+            if df["Unknown words"].gt(0).any():
+                st.caption(
+                    f"Unknown words are not in the training vocabulary ({cfg['vocab_size'] - 1} words), "
+                    "so the model can't use them. Predictions for those sentences are less reliable."
                 )
-                if df["Unknown words"].gt(0).any():
-                    st.caption(
-                        f"Unknown words are not in the training vocabulary ({cfg['vocab_size'] - 1} words), "
-                        "so the model can't use them. Predictions for those sentences are less reliable."
-                    )
-                if df["Truncated"].any():
-                    st.caption(f"Sentences longer than {cfg['max_length']} words were cut off, as in training.")
+            if df["Truncated"].any():
+                st.caption(f"Sentences longer than {cfg['max_length']} words were cut off, as in training.")
 
         if (ART / "results.json").exists():
             with st.expander("Model performance on the test set", expanded=False):
@@ -268,6 +283,8 @@ with tab_img:
             st.caption("Dark digit on a light background works. It is auto-inverted, cropped and centred like MNIST.")
             if up:
                 img28 = to_mnist(Image.open(up))
+                if img28 is None:
+                    st.warning("No digit found in this image. Try a darker digit on a plain background.")
 
         if img28 is not None:
             probs = model_2d.predict(img28.reshape(1, 28, 28, 1), verbose=0)[0]
