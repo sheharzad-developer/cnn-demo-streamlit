@@ -1,0 +1,9 @@
+# Match the versions used for training in Colab (TF 2.21.0 / Keras 3.13.2)
+tensorflow-cpu==2.21.0; sys_platform != "darwin"
+tensorflow==2.21.0; sys_platform == "darwin"  # no tensorflow-cpu wheels for macOS
+keras==3.13.2
+streamlit>=1.50
+numpy
+pandas
+pillow
+matplotlib

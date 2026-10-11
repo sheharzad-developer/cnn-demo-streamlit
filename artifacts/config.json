@@ -1,0 +1,10 @@
+{
+  "max_length": 9,
+  "vocab_size": 80,
+  "padding": "post",
+  "truncating": "post",
+  "threshold": 0.5,
+  "oov_index": 1,
+  "tensorflow_version": "2.21.0",
+  "keras_version": "3.13.2"
+}
